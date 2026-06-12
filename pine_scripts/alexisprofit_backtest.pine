@@ -1,0 +1,152 @@
+// ============================================================
+// AlexisProfit Bot — Backteste Pine Script
+// Estratégia: RSI + DCA + Trailing Profit + Stop Loss
+// Convertido do bot.py / strategy.py (Python) para Pine Script
+// Gerado automaticamente pelo Agente Base44
+// ============================================================
+
+//@version=5
+strategy(
+     title         = "AlexisProfit — RSI + DCA + Trailing",
+     overlay       = true,
+     initial_capital = 1000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 15,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.1,
+     slippage         = 2
+)
+
+// ============================================================
+// PARÂMETROS (editáveis no painel do TradingView)
+// ============================================================
+rsi_period          = input.int(14,    "Período RSI",              group="RSI")
+rsi_threshold       = input.float(30,  "Gatilho de Compra (RSI <)", group="RSI")
+
+dca_trigger_1       = input.float(1.5, "DCA 1 — Queda % para recompra", group="DCA")
+dca_trigger_2       = input.float(2.5, "DCA 2 — Queda % para recompra", group="DCA")
+dca_qty_pct         = input.float(15,  "Capital DCA (%)",               group="DCA")
+
+stop_loss_pct       = input.float(10.0, "Stop Loss (%)",           group="Saída")
+trail_trigger_pct   = input.float(2.0,  "Trailing — Gatilho (%)",  group="Saída")
+trail_callback_pct  = input.float(0.2,  "Trailing — Callback (%)", group="Saída")
+
+cooldown_bars       = input.int(1, "Cooldown (velas após venda)", group="Filtros")
+
+// ============================================================
+// CÁLCULO RSI — Suavização de Wilder (idêntico ao bot Python)
+// ============================================================
+rsi_val = ta.rsi(close, rsi_period)
+
+// ============================================================
+// VARIÁVEIS DE ESTADO
+// ============================================================
+var float avg_price          = 0.0
+var int   dca_count          = 0
+var bool  trailing_active    = false
+var float highest_price      = 0.0
+var int   bars_since_sell    = 999
+var bool  in_position        = false
+
+// Cooldown counter
+bars_since_sell := in_position ? bars_since_sell : bars_since_sell + 1
+
+// ============================================================
+// SINAL DE ENTRADA — RSI abaixo do threshold + cooldown ok
+// ============================================================
+buy_signal = not in_position and rsi_val < rsi_threshold and bars_since_sell >= cooldown_bars
+
+if buy_signal
+    strategy.entry("Long", strategy.long, comment="🟢 Entrada RSI")
+    avg_price       := close
+    dca_count       := 0
+    trailing_active := false
+    highest_price   := 0.0
+    in_position     := true
+    bars_since_sell := 0
+
+// ============================================================
+// GESTÃO DA POSIÇÃO
+// ============================================================
+if in_position
+    price_change_pct = ((close - avg_price) / avg_price) * 100
+
+    // ── Atualiza pico do trailing ──────────────────────────
+    if trailing_active
+        if close > highest_price
+            highest_price := close
+
+    // ── STOP LOSS ─────────────────────────────────────────
+    if price_change_pct <= -stop_loss_pct
+        strategy.close("Long", comment="🔴 Stop Loss")
+        in_position     := false
+        trailing_active := false
+        avg_price       := 0.0
+        dca_count       := 0
+        bars_since_sell := 0
+
+    // ── TRAILING PROFIT ───────────────────────────────────
+    else if trailing_active
+        drop_from_peak = ((highest_price - close) / highest_price) * 100
+        if drop_from_peak >= trail_callback_pct
+            strategy.close("Long", comment="✅ Trailing Profit")
+            in_position     := false
+            trailing_active := false
+            avg_price       := 0.0
+            dca_count       := 0
+            bars_since_sell := 0
+
+    // ── ATIVAR TRAILING ───────────────────────────────────
+    else if price_change_pct >= trail_trigger_pct
+        trailing_active := true
+        highest_price   := close
+
+    // ── DCA 1 ─────────────────────────────────────────────
+    else if dca_count == 0 and price_change_pct <= -dca_trigger_1
+        old_cost        = avg_price * strategy.position_size
+        new_cost        = close * (strategy.equity * dca_qty_pct / 100 / close)
+        new_qty         = strategy.equity * dca_qty_pct / 100 / close
+        avg_price       := (old_cost + close * new_qty) / (strategy.position_size + new_qty)
+        dca_count       := 1
+        strategy.entry("Long", strategy.long, qty=new_qty, comment="🔵 DCA 1")
+
+    // ── DCA 2 ─────────────────────────────────────────────
+    else if dca_count == 1 and price_change_pct <= -dca_trigger_2
+        old_cost        = avg_price * strategy.position_size
+        new_qty         = strategy.equity * dca_qty_pct / 100 / close
+        avg_price       := (old_cost + close * new_qty) / (strategy.position_size + new_qty)
+        dca_count       := 2
+        strategy.entry("Long", strategy.long, qty=new_qty, comment="🔵 DCA 2")
+
+// ============================================================
+// PLOTAGENS VISUAIS
+// ============================================================
+plot(rsi_val, "RSI", display=display.none)
+
+// Preço médio de entrada
+avg_line = in_position ? avg_price : na
+plot(avg_line, "Preço Médio", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_linebr)
+
+// Linha de Stop Loss
+stop_line = in_position ? avg_price * (1 - stop_loss_pct / 100) : na
+plot(stop_line, "Stop Loss", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+
+// Linha de Trailing Trigger
+trail_line = in_position ? avg_price * (1 + trail_trigger_pct / 100) : na
+plot(trail_line, "Trailing Trigger", color=color.new(color.green, 0), linewidth=1, style=plot.style_linebr)
+
+// ============================================================
+// PAINEL DE INFORMAÇÕES (Table)
+// ============================================================
+var table info = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "RSI Atual",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, str.tostring(rsi_val, "#.##"), text_color=rsi_val < rsi_threshold ? color.green : color.red, text_size=size.small)
+    table.cell(info, 0, 1, "Em Posição",     text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 1, in_position ? "✅ SIM" : "⏸ NÃO", text_color=in_position ? color.green : color.gray, text_size=size.small)
+    table.cell(info, 0, 2, "DCA Count",      text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 2, str.tostring(dca_count) + "/2", text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 3, "Trailing",       text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 3, trailing_active ? "⚡ ATIVO" : "—", text_color=trailing_active ? color.yellow : color.gray, text_size=size.small)
+    table.cell(info, 0, 4, "Preço Médio",    text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 4, in_position ? str.tostring(avg_price, "#.##") : "—", text_color=color.white, text_size=size.small)
